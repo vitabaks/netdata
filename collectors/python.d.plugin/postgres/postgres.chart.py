@@ -57,6 +57,7 @@ QUERY_NAME_SERVER_VERSION = 'SERVER_VERSION'
 QUERY_NAME_AUTOVACUUM = 'AUTOVACUUM'
 QUERY_NAME_DIFF_LSN = 'DIFF_LSN'
 QUERY_NAME_WAL_WRITES = 'WAL_WRITES'
+QUERY_NAME_STAT_STATEMENTS = 'STAT_STATEMENTS'
 
 METRICS = {
     QUERY_NAME_DATABASE: [
@@ -149,6 +150,22 @@ METRICS = {
     QUERY_NAME_REPSLOT_FILES: [
         'replslot_wal_keep',
         'replslot_files'
+    ],
+    QUERY_NAME_STAT_STATEMENTS: [
+        'queryid',
+        'calls',
+        'total_time',
+        'avg_time',
+        'rows',
+        'shared_blks_hit',
+        'shared_blks_read',
+        'shared_blks_written',
+        'shared_blks_dirtied',
+        'temp_blks_read',
+        'temp_blks_written',
+        'blk_read_time',
+        'blk_write_time',
+        'wal_bytes'
     ]
 }
 
@@ -671,6 +688,151 @@ SELECT
 """,
 }
 
+QUERY_STAT_STATEMENTS = {
+    DEFAULT: """
+WITH q_data AS (
+    SELECT
+        queryid::text AS queryid,
+        sum(calls)::int8 AS calls,
+        round(sum(total_exec_time)::numeric, 3)::double precision AS total_time,
+        round(sum(mean_exec_time)::numeric, 3)::double precision AS avg_time,
+        sum(rows)::int8 as rows,
+        sum(shared_blks_hit)::int8 AS shared_blks_hit,
+        sum(shared_blks_read)::int8 AS shared_blks_read,
+        sum(shared_blks_written)::int8 AS shared_blks_written,
+        sum(shared_blks_dirtied)::int8 AS shared_blks_dirtied,
+        sum(temp_blks_read)::int8 AS temp_blks_read,
+        sum(temp_blks_written)::int8 AS temp_blks_written,
+        round(sum(blk_read_time)::numeric, 3)::double precision AS blk_read_time,
+        round(sum(blk_write_time)::numeric, 3)::double precision AS blk_write_time,
+        sum(wal_bytes)::int8 AS wal_bytes
+    FROM
+        pg_stat_statements s
+    GROUP BY
+        queryid
+)
+SELECT
+    b.queryid,
+    b.calls,
+    b.total_time,
+    b.avg_time,
+    b.rows,
+    b.shared_blks_hit,
+    b.shared_blks_read,
+    b.shared_blks_written,
+    b.shared_blks_dirtied,
+    b.temp_blks_read,
+    b.temp_blks_written,
+    b.blk_read_time,
+    b.blk_write_time,
+    b.wal_bytes
+FROM (
+    SELECT
+        *
+    FROM (
+        SELECT
+            *
+        FROM
+            q_data
+        ORDER BY
+            calls DESC
+        LIMIT 10) a
+UNION
+    SELECT
+        *
+    FROM (
+        SELECT
+            *
+        FROM
+            q_data
+        WHERE
+            total_time > 0
+        ORDER BY
+            total_time DESC
+        LIMIT 10) a
+UNION
+    SELECT
+        *
+    FROM (
+        SELECT
+            *
+        FROM
+            q_data
+        WHERE
+            avg_time > 0
+        ORDER BY
+            avg_time DESC
+        LIMIT 10) a
+UNION
+    SELECT
+        *
+    FROM (
+        SELECT
+            *
+        FROM
+            q_data
+        WHERE
+            shared_blks_read > 0
+        ORDER BY
+            shared_blks_read DESC
+        LIMIT 10) a
+UNION
+    SELECT
+        *
+    FROM (
+        SELECT
+            *
+        FROM
+            q_data
+        WHERE
+            shared_blks_written > 0
+        ORDER BY
+            shared_blks_written DESC
+        LIMIT 10) a
+UNION
+    SELECT
+        *
+    FROM (
+        SELECT
+            *
+        FROM
+            q_data
+        WHERE
+            temp_blks_read > 0
+        ORDER BY
+            temp_blks_read DESC
+        LIMIT 10) a
+UNION
+    SELECT
+        *
+    FROM (
+        SELECT
+            *
+        FROM
+            q_data
+        WHERE
+            temp_blks_written > 0
+        ORDER BY
+            temp_blks_written DESC
+        LIMIT 10) a
+UNION
+    SELECT
+        *
+    FROM (
+        SELECT
+            *
+        FROM
+            q_data
+        WHERE
+            wal_bytes > 0
+        ORDER BY
+            wal_bytes DESC
+        LIMIT 10) a) b
+--limit 1 for test
+ORDER BY total_time desc LIMIT 1;
+""",
+}
+
 def query_factory(name, version=NO_VERSION):
     if name == QUERY_NAME_BACKENDS:
         return QUERY_BACKEND[DEFAULT]
@@ -734,6 +896,8 @@ def query_factory(name, version=NO_VERSION):
         if version < 100000:
             return QUERY_DIFF_LSN[V96]
         return QUERY_DIFF_LSN[DEFAULT]
+    elif name == QUERY_NAME_STAT_STATEMENTS:
+        return QUERY_STAT_STATEMENTS[DEFAULT]
 
     raise ValueError('unknown query')
 
@@ -767,7 +931,9 @@ ORDER = [
     'replication_slot',
     'standby_delta',
     'standby_lag',
-    'autovacuum'
+    'autovacuum',
+    'stat_statements_total_time',
+    'stat_statements_avg_time'
 ]
 
 CHARTS = {
@@ -977,6 +1143,18 @@ CHARTS = {
             ['replslot_wal_keep', 'wal keeped', 'absolute'],
             ['replslot_files', 'pg_replslot files', 'absolute']
         ]
+    },
+    'stat_statements_total_time': {
+        'options': [None, 'Total time', 'milliseconds', 'stat statements', 'postgres.stat_statements_total_time', 'line'],
+        'lines': [
+            ['total_time', 'total_time', 'incremental' ]
+        ]
+    },
+    'stat_statements_avg_time': {
+        'options': [None, 'Average time', 'milliseconds', 'stat statements', 'postgres.stat_statements_avg_time', 'line'],
+        'lines': [
+            ['avg_time', 'avg_time', 'incremental' ]
+        ]
     }
 }
 
@@ -1161,6 +1339,7 @@ class Service(SimpleService):
         self.queries[query_factory(QUERY_NAME_DIFF_LSN, self.server_version)] = METRICS[QUERY_NAME_WAL_WRITES]
         self.queries[query_factory(QUERY_NAME_STANDBY_DELTA, self.server_version)] = METRICS[QUERY_NAME_STANDBY_DELTA]
         self.queries[query_factory(QUERY_NAME_BLOCKERS, self.server_version)] = METRICS[QUERY_NAME_BLOCKERS]
+        self.queries[query_factory(QUERY_NAME_STAT_STATEMENTS)] = METRICS[QUERY_NAME_STAT_STATEMENTS]
 
         if self.do_index_stats:
             self.queries[query_factory(QUERY_NAME_INDEX_STATS)] = METRICS[QUERY_NAME_INDEX_STATS]
